@@ -1,0 +1,112 @@
+"use strict";
+
+const W=1280,H=720,TAU=Math.PI*2;
+const canvas=document.getElementById("game"),ctx=canvas.getContext("2d");
+ctx.imageSmoothingEnabled=false;
+const ui={start:document.getElementById("start-screen"),upgrade:document.getElementById("upgrade-screen"),over:document.getElementById("game-over-screen"),cards:document.getElementById("upgrade-cards"),stats:document.getElementById("final-stats"),record:document.getElementById("new-record"),healthFill:document.getElementById("hud-health-fill"),healthText:document.getElementById("hud-health-text"),kills:document.getElementById("hud-kills"),weapon:document.getElementById("hud-weapon"),next:document.getElementById("hud-next"),time:document.getElementById("hud-time")};
+const clamp=(n,a,b)=>Math.max(a,Math.min(b,n));
+const rand=(a,b)=>a+Math.random()*(b-a);
+const hit=(a,b)=>a.x-a.w/2<b.x+b.w/2&&a.x+a.w/2>b.x-b.w/2&&a.y-a.h/2<b.y+b.h/2&&a.y+a.h/2>b.y-b.h/2;
+const length=(x,y)=>Math.hypot(x,y)||1;
+const formatTime=s=>`${String(Math.floor(s/60)).padStart(2,"0")}:${String(Math.floor(s%60)).padStart(2,"0")}`;
+
+const weapons=[
+ {name:"ПИСТОЛЕТ",rate:2,damage:10,count:1,spread:0,pierce:0,speed:620,range:650},
+ {name:"ДВОЙНОЙ ПИСТОЛЕТ",rate:2.35,damage:11,count:2,spread:.09,pierce:0,speed:640,range:650},
+ {name:"ДРОБОВИК",rate:1.5,damage:14,count:5,spread:.36,pierce:0,speed:560,range:350},
+ {name:"ПИСТОЛЕТ-ПУЛЕМЁТ",rate:6,damage:7,count:1,spread:.09,pierce:0,speed:670,range:620},
+ {name:"АВТОМАТ ПОРКА",rate:5,damage:15,count:1,spread:.045,pierce:0,speed:720,range:700},
+ {name:"ТЯЖЁЛЫЙ АВТОМАТ",rate:4,damage:24,count:1,spread:.035,pierce:1,speed:760,range:760},
+ {name:"ДАБАЛАТОРНАЯ ПУШКА",rate:7,damage:26,count:3,spread:.14,pierce:2,speed:820,range:820}
+];
+const enemyTypes={
+ normal:{w:27,h:42,hp:30,speed:76,damage:11,body:"#747b7d",head:"#61b955",score:1},
+ fast:{w:20,h:33,hp:28,speed:138,damage:9,body:"#a7acad",head:"#73ff69",score:1},
+ fat:{w:48,h:55,hp:140,speed:49,damage:23,body:"#4b5254",head:"#347b39",score:1},
+ acid:{w:29,h:43,hp:45,speed:82,damage:20,body:"#5b3a72",head:"#b14cff",score:1},
+ explosive:{w:30,h:43,hp:40,speed:72,damage:14,body:"#5d665f",head:"#85b875",score:1},
+ boss:{w:144,h:165,hp:1800,speed:34,damage:20,clubDamage:38,body:"#343b3d",head:"#234f29",score:1}
+};
+const upgradePool=[
+ {name:"УРОН",desc:"+20% к урону",apply:p=>p.damageMult*=1.2},
+ {name:"СКОРОСТРЕЛЬНОСТЬ",desc:"+15% к скорости стрельбы",apply:p=>p.rateMult*=1.15},
+ {name:"СКОРОСТЬ ПОРКА",desc:"+10% к скорости движения",apply:p=>p.speed*=1.1},
+ {name:"ЗДОРОВЬЕ",desc:"+20 макс. HP и восстановить 20",apply:p=>{p.maxHp+=20;p.hp=Math.min(p.maxHp,p.hp+20)}},
+ {name:"БРОНЯ",desc:"−10% входящего урона",apply:p=>p.armor=1-(1-p.armor)*.9},
+ {name:"ПРОБИВАНИЕ",desc:"Пули пробивают ещё 1 зондби",apply:p=>p.bonusPierce++},
+ {name:"ДОП. ПУЛЯ",desc:"+1 пуля за выстрел",apply:p=>p.bonusBullets++},
+ {name:"РЕГЕНЕРАЦИЯ",desc:"+1.5 HP каждые 5 секунд",apply:p=>p.regen+=.3}
+];
+
+class Particle{constructor(x,y,color){this.x=x;this.y=y;this.vx=rand(-110,110);this.vy=rand(-110,110);this.life=rand(.25,.55);this.max=this.life;this.color=color;this.size=rand(3,7)}update(dt){this.life-=dt;this.x+=this.vx*dt;this.y+=this.vy*dt;this.vx*=.96;this.vy*=.96}draw(){ctx.globalAlpha=clamp(this.life/this.max,0,1);ctx.fillStyle=this.color;ctx.fillRect(this.x,this.y,this.size,this.size);ctx.globalAlpha=1}}
+class Bullet{constructor(x,y,a,weapon,p){this.x=x;this.y=y;this.w=9;this.h=4;this.vx=Math.cos(a)*weapon.speed;this.vy=Math.sin(a)*weapon.speed;this.damage=weapon.damage*p.damageMult;this.pierce=weapon.pierce+p.bonusPierce;this.life=weapon.range/weapon.speed;this.hitSet=new Set();this.angle=a}update(dt){this.x+=this.vx*dt;this.y+=this.vy*dt;this.life-=dt}draw(){ctx.save();ctx.translate(this.x,this.y);ctx.rotate(this.angle);ctx.fillStyle="#fff4a8";ctx.fillRect(-6,-2,12,4);ctx.restore()}}
+class Enemy{
+ constructor(type,x,y,id,hpScale=1){Object.assign(this,enemyTypes[type]);this.type=type;this.x=x;this.y=y;this.id=id;this.hp=Math.ceil(this.hp*hpScale);this.maxHp=this.hp;this.flash=0;this.dead=false;this.fuse=-1;this.clubAngle=rand(0,TAU)}
+ update(dt,g){
+  let dx=g.player.x-this.x,dy=g.player.y-this.y,l=length(dx,dy);
+  if(this.type==="explosive"&&l<105&&this.fuse<0)this.fuse=1.05;
+  if(this.fuse>=0){this.fuse-=dt;if(this.fuse<=0){g.explode(this);return}}
+  if(this.type==="boss"){
+   this.clubAngle+=dt*2.35;
+   const cx=this.x+Math.cos(this.clubAngle)*102,cy=this.y+Math.sin(this.clubAngle)*102;
+   if(Math.hypot(g.player.x-cx,g.player.y-cy)<42)g.player.hurt(this.clubDamage,g);
+  }
+  const slow=this.fuse>=0?.28:1,vx=dx/l*this.speed*slow,vy=dy/l*this.speed*slow;
+  const next={x:this.x+vx*dt,y:this.y+vy*dt,w:this.w,h:this.h};
+  for(const o of g.obstacles){if(hit(next,o)){const tryX={x:this.x+vx*dt,y:this.y,w:this.w,h:this.h};const tryY={x:this.x,y:this.y+vy*dt,w:this.w,h:this.h};if(!hit(tryX,o))this.x=tryX.x;else if(!hit(tryY,o))this.y=tryY.y;else{const side=(this.id%2?1:-1);this.x+=-dy/l*this.speed*.7*side*dt;this.y+=dx/l*this.speed*.7*side*dt}this.flash=Math.max(0,this.flash-dt);return}}
+  this.x=next.x;this.y=next.y;this.flash=Math.max(0,this.flash-dt)
+ }
+ draw(){
+  ctx.save();ctx.translate(Math.round(this.x),Math.round(this.y));
+  if(this.type==="boss"){
+   ctx.save();ctx.rotate(this.clubAngle);ctx.fillStyle="#6b4a2b";ctx.fillRect(25,-8,92,16);ctx.fillStyle="#292523";ctx.fillRect(99,-19,36,38);ctx.restore()
+  }
+  const fuseBlink=this.type==="explosive"&&this.fuse>=0&&Math.floor(this.fuse*12)%2===0;
+  if(this.flash>0||fuseBlink){ctx.fillStyle=fuseBlink?"#fff6b0":"#fff";ctx.fillRect(-this.w/2,-this.h/2,this.w,this.h)}else{ctx.fillStyle=this.body;ctx.fillRect(-this.w/2,-this.h/2+this.h*.3,this.w,this.h*.7);ctx.fillStyle=this.head;ctx.fillRect(-this.w*.42,-this.h/2,this.w*.84,this.h*.34);ctx.fillStyle="#172018";const eye=Math.max(3,this.w*.08);ctx.fillRect(-this.w*.22,-this.h*.36,eye,eye);ctx.fillRect(this.w*.12,-this.h*.36,eye,eye)}
+  if(this.type==="acid"){ctx.fillStyle="#d889ff";ctx.fillRect(-this.w*.38,this.h*.33,this.w*.76,4)}
+  if(this.type==="boss"){ctx.fillStyle="#7c1717";ctx.fillRect(-this.w/2,-this.h/2-15,this.w,9);ctx.fillStyle="#73ff69";ctx.fillRect(-this.w/2,-this.h/2-15,this.w*clamp(this.hp/this.maxHp,0,1),9)}
+  ctx.restore()
+ }
+}
+class Player{constructor(){this.x=W/2;this.y=H/2+50;this.vx=0;this.vy=0;this.w=24;this.h=38;this.maxHp=100;this.hp=100;this.speed=220;this.damageMult=1;this.rateMult=1;this.armor=0;this.bonusPierce=0;this.bonusBullets=0;this.regen=0;this.invuln=0;this.fireCd=0;this.aim=-Math.PI/2}update(dt,g){let dx=(keys.ArrowRight||keys.KeyD?1:0)-(keys.ArrowLeft||keys.KeyA?1:0)+joystick.x,dy=(keys.ArrowDown||keys.KeyS?1:0)-(keys.ArrowUp||keys.KeyW?1:0)+joystick.y,l=Math.hypot(dx,dy);if(l>1){dx/=l;dy/=l}const response=l>.01?18:26,smooth=1-Math.exp(-response*dt);this.vx+=(dx*this.speed-this.vx)*smooth;this.vy+=(dy*this.speed-this.vy)*smooth;if(Math.abs(this.vx)<.15)this.vx=0;if(Math.abs(this.vy)<.15)this.vy=0;const ox=this.x,oy=this.y,minX=this.w/2+8,maxX=W-this.w/2-8,minY=112+this.h/2,maxY=H-this.h/2-8;this.x=clamp(this.x+this.vx*dt,minX,maxX);this.y=clamp(this.y+this.vy*dt,minY,maxY);for(const o of g.obstacles)if(hit(this,o)){this.x=ox;this.y=oy;this.vx=0;this.vy=0}this.x=clamp(this.x,minX,maxX);this.y=clamp(this.y,minY,maxY);if(this.x===minX||this.x===maxX)this.vx=0;if(this.y===minY||this.y===maxY)this.vy=0;this.invuln=Math.max(0,this.invuln-dt);this.fireCd-=dt;if(this.regen)this.hp=Math.min(this.maxHp,this.hp+this.regen*dt);let target=null,best=500*500;for(const e of g.enemies){const d=(e.x-this.x)**2+(e.y-this.y)**2;if(!e.dead&&d<best){best=d;target=e}}if(target){this.aim=Math.atan2(target.y-this.y,target.x-this.x);const weapon=weapons[g.weaponLevel];if(this.fireCd<=0){g.fire(weapon);this.fireCd=1/(weapon.rate*this.rateMult)}}}hurt(amount,g){if(this.invuln>0)return;this.hp-=amount*(1-this.armor);this.invuln=.5;g.shake=Math.min(7,amount*.25);for(let i=0;i<5;i++)g.particles.push(new Particle(this.x,this.y,"#ff4e45"));if(this.hp<=0)g.end()}draw(g){if(this.invuln>0&&Math.floor(this.invuln*18)%2)return;ctx.save();ctx.translate(Math.round(this.x),Math.round(this.y));ctx.fillStyle="#090b0c";ctx.fillRect(-12,-10,24,29);ctx.fillStyle="#ece9df";ctx.fillRect(-3,-8,6,10);ctx.fillStyle="#d33b35";ctx.fillRect(-2,1,4,10);ctx.fillStyle="#bd8a65";ctx.fillRect(-9,-23,18,14);ctx.fillStyle="#171514";ctx.fillRect(-9,-23,18,4);ctx.rotate(this.aim);ctx.fillStyle="#17191a";ctx.fillRect(7,-3,22,6);ctx.fillStyle="#858d8e";ctx.fillRect(23,-2,10,4);ctx.restore()}}
+
+class Game{
+ constructor(){this.state="menu";this.bestKills=Number(localStorage.getItem("porkBestKills")||0);this.bestTime=Number(localStorage.getItem("porkBestTime")||0);this.last=performance.now();this.setupArena();requestAnimationFrame(t=>this.loop(t))}
+ setupArena(){this.cracks=Array.from({length:30},()=>({x:rand(0,W),y:rand(120,H),a:rand(0,TAU),l:rand(12,45)}));this.debris=Array.from({length:28},()=>({x:rand(0,W),y:rand(120,H),w:rand(3,12),h:rand(3,8),c:Math.random()<.2?"#9d433c":"#33393b"}));this.obstacles=[{x:252,y:282,w:128,h:55,a:-.13,c:"#6d3635"},{x:1010,y:312,w:120,h:53,a:.1,c:"#354d5f"},{x:830,y:590,w:132,h:56,a:-.08,c:"#70673d"},{x:460,y:555,w:110,h:50,a:.06,c:"#3d5c49"}]}
+ start(){this.player=new Player();this.enemies=[];this.bullets=[];this.particles=[];this.kills=0;this.time=0;this.spawnCd=1.9;this.enemyId=0;this.weaponLevel=0;this.nextUpgrade=60;this.nextBoss=240;this.banner=0;this.bannerTitle="";this.bannerText="";this.shake=0;this.state="play";hideAll();resetJoystick()}
+ fire(w){const total=w.count+this.player.bonusBullets,boost=this.time<60?1.2:1;for(let i=0;i<total;i++){const pos=total===1?0:(i/(total-1)-.5);const a=this.player.aim+pos*w.spread+rand(-w.spread*.08,w.spread*.08),shot={...w,damage:w.damage*boost};this.bullets.push(new Bullet(this.player.x+Math.cos(a)*30,this.player.y+Math.sin(a)*30,a,shot,this.player))}for(let i=0;i<2;i++)this.particles.push(new Particle(this.player.x+Math.cos(this.player.aim)*32,this.player.y+Math.sin(this.player.aim)*32,"#fff4a8"))}
+ hpScale(){if(this.time<60)return .8;return 1+Math.max(0,Math.floor(this.time/60)-1)*.2}
+ spawn(forcedType=null){let side=Math.floor(Math.random()*4),x,y,margin=forcedType==="boss"?100:28;if(side===0){x=rand(20,W-20);y=105-margin}else if(side===1){x=W+margin;y=rand(130,H-20)}else if(side===2){x=rand(20,W-20);y=H+margin}else{x=-margin;y=rand(130,H-20)}let type=forcedType||"normal";if(!forcedType&&this.time>=60){const r=Math.random(),explosive=this.time>=180?Math.min(.12,.05+(this.time-180)/2400):0,acid=this.time>=120?Math.min(.18,.08+(this.time-120)/1800):0,fat=this.time>=120?Math.min(.17,.10+(this.time-120)/1800):0,fast=Math.min(.28,.20+(this.time-60)/1800);if(r<explosive)type="explosive";else if(r<explosive+acid)type="acid";else if(r<explosive+acid+fat)type="fat";else if(r<explosive+acid+fat+fast)type="fast"}this.enemies.push(new Enemy(type,x,y,this.enemyId++,this.hpScale()))}
+ explode(e){if(e.dead)return;e.dead=true;const radius=165,push=rand(120,168),dx=this.player.x-e.x,dy=this.player.y-e.y,d=length(dx,dy);if(d<radius){this.player.hurt(35,this);this.player.x=clamp(this.player.x+dx/d*push,this.player.w/2+8,W-this.player.w/2-8);this.player.y=clamp(this.player.y+dy/d*push,112+this.player.h/2,H-this.player.h/2-8);this.player.vx=dx/d*420;this.player.vy=dy/d*420}for(const other of this.enemies){if(other===e||other.dead)continue;const ox=other.x-e.x,oy=other.y-e.y,od=length(ox,oy);if(od<210){other.x+=ox/od*push;other.y+=oy/od*push}}for(let i=0;i<34;i++)this.particles.push(new Particle(e.x,e.y,i%3?"#ffb23d":"#f4ff94"));this.shake=10}
+ kill(e){if(e.dead)return;e.dead=true;this.kills++;for(let i=0;i<(e.type==="boss"?28:6);i++)this.particles.push(new Particle(e.x,e.y,i%2?e.head:e.body));const newLevel=Math.min(6,Math.floor(this.kills/50));if(newLevel>this.weaponLevel){this.weaponLevel=newLevel;this.banner=1.5;this.bannerTitle="ОРУЖИЕ УЛУЧШЕНО";this.bannerText=weapons[newLevel].name}if(this.kills>=this.nextUpgrade){this.nextUpgrade+=60;this.showUpgrades()}}
+ showUpgrades(){this.state="upgrade";ui.cards.textContent="";const choices=[...upgradePool].sort(()=>Math.random()-.5).slice(0,3);for(const u of choices){const b=document.createElement("button");b.className="card";b.innerHTML=`<b>${u.name}</b><span>${u.desc}</span>`;b.onclick=()=>{u.apply(this.player);ui.upgrade.classList.remove("active");this.state="play";this.last=performance.now()};ui.cards.appendChild(b)}ui.upgrade.classList.add("active")}
+ end(){if(this.state!=="play")return;this.state="over";const newRecord=this.kills>this.bestKills||this.time>this.bestTime;this.bestKills=Math.max(this.bestKills,this.kills);this.bestTime=Math.max(this.bestTime,this.time);localStorage.setItem("porkBestKills",this.bestKills);localStorage.setItem("porkBestTime",this.bestTime);ui.stats.innerHTML=`<span>Время</span><strong>${formatTime(this.time)}</strong><span>Убито зондби</span><strong>${this.kills}</strong><span>Оружие</span><strong>${weapons[this.weaponLevel].name}</strong><span>Лучший результат</span><strong>${this.bestKills} / ${formatTime(this.bestTime)}</strong>`;ui.record.classList.toggle("show",newRecord);ui.over.classList.add("active");resetJoystick()}
+ update(dt){this.time+=dt;this.player.update(dt,this);this.spawnCd-=dt;const baseInterval=Math.max(.12,.86-this.time*.0035),startRate=this.time<60?.45+.55*Math.pow(this.time/60,1.5):1,interval=baseInterval/startRate;if(this.spawnCd<=0&&this.enemies.length<200){this.spawn();if(this.time>75&&Math.random()<.16)this.spawn();if(this.time>170&&Math.random()<.16)this.spawn();this.spawnCd=interval}if(this.time>=this.nextBoss&&!this.enemies.some(e=>e.type==="boss")){this.spawn("boss");this.nextBoss+=240;this.banner=2;this.bannerTitle="ОПАСНОСТЬ";this.bannerText="БОСС ЗОНДБИ"}for(const e of this.enemies){e.update(dt,this);if(!e.dead&&hit(e,this.player))this.player.hurt(e.damage,this)}for(const b of this.bullets){b.update(dt);for(const e of this.enemies){if(e.dead||b.hitSet.has(e.id)||!hit(b,e))continue;b.hitSet.add(e.id);e.hp-=b.damage;e.flash=.06;if(e.hp<=0)this.kill(e);if(b.pierce<=0){b.life=0;break}b.pierce--}}this.enemies=this.enemies.filter(e=>!e.dead);this.bullets=this.bullets.filter(b=>b.life>0&&b.x>-30&&b.x<W+30&&b.y>-30&&b.y<H+30);for(const p of this.particles)p.update(dt);this.particles=this.particles.filter(p=>p.life>0);this.banner=Math.max(0,this.banner-dt);this.shake=Math.max(0,this.shake-dt*18);this.updateDomHud()}
+ updateDomHud(){const hp=clamp(this.player.hp/this.player.maxHp,0,1);ui.healthFill.style.width=`${hp*100}%`;ui.healthFill.style.background=hp<.3?"#ff4e45":"#73ff69";ui.healthText.textContent=`${Math.ceil(Math.max(0,this.player.hp))} / ${this.player.maxHp}`;ui.kills.textContent=this.kills;ui.weapon.textContent=weapons[this.weaponLevel].name;ui.next.textContent=this.weaponLevel<6?`СЛЕД.: ${(this.weaponLevel+1)*50}`:"МАКСИМУМ";ui.time.textContent=formatTime(this.time)}
+ drawBackground(){ctx.fillStyle="#252a2c";ctx.fillRect(0,0,W,H);ctx.fillStyle="#1b1f21";ctx.fillRect(0,0,W,112);ctx.fillStyle="#303638";ctx.fillRect(0,85,W,27);ctx.fillStyle="#111516";for(let x=30;x<W;x+=155)ctx.fillRect(x,95,95,17);ctx.fillStyle="#b4bab4";ctx.font="900 34px Impact, sans-serif";ctx.textAlign="center";ctx.fillText("З О Н Д Б И   Д А Б А Л А Т О Р И Я",W/2,52);ctx.fillStyle="#ff453d";for(let x=90;x<W;x+=220){ctx.fillRect(x,75,12,8);ctx.globalAlpha=.13;ctx.fillRect(x-20,65,52,28);ctx.globalAlpha=1}ctx.strokeStyle="rgba(215,216,197,.16)";ctx.lineWidth=4;for(let x=40;x<W;x+=170){ctx.beginPath();ctx.moveTo(x,180);ctx.lineTo(x+30,310);ctx.stroke();ctx.beginPath();ctx.moveTo(x+38,520);ctx.lineTo(x+7,680);ctx.stroke()}ctx.strokeStyle="#141819";ctx.lineWidth=2;for(const c of this.cracks){ctx.beginPath();ctx.moveTo(c.x,c.y);ctx.lineTo(c.x+Math.cos(c.a)*c.l,c.y+Math.sin(c.a)*c.l);ctx.lineTo(c.x+Math.cos(c.a+.7)*c.l*.35,c.y+Math.sin(c.a+.7)*c.l*.35);ctx.stroke()}for(const d of this.debris){ctx.fillStyle=d.c;ctx.fillRect(d.x,d.y,d.w,d.h)}ctx.fillStyle="#7b2725";ctx.fillRect(W/2-108,87,216,25);ctx.fillStyle="#1b1e20";ctx.fillRect(W/2-96,91,192,21)}
+ drawObstacle(o){ctx.save();ctx.translate(o.x,o.y);ctx.rotate(o.a);ctx.fillStyle="#111";ctx.fillRect(-o.w*.38,-o.h*.65,22,12);ctx.fillRect(o.w*.2,-o.h*.65,22,12);ctx.fillRect(-o.w*.38,o.h*.45,22,12);ctx.fillRect(o.w*.2,o.h*.45,22,12);ctx.fillStyle=o.c;ctx.fillRect(-o.w/2,-o.h/2,o.w,o.h);ctx.fillStyle="#171d1f";ctx.fillRect(-o.w*.2,-o.h*.38,o.w*.42,o.h*.76);ctx.strokeStyle="#b9c1c0";ctx.beginPath();ctx.moveTo(-o.w*.18,-o.h*.32);ctx.lineTo(o.w*.18,o.h*.28);ctx.stroke();ctx.fillStyle="#252a2c";ctx.fillRect(-o.w*.5,-3,18,8);ctx.restore()}
+ drawHud(){if(!matchMedia("(pointer: coarse), (max-width: 900px)").matches){ctx.fillStyle="rgba(8,10,11,.82)";ctx.fillRect(18,18,270,72);ctx.fillStyle="#4b2423";ctx.fillRect(31,52,238,20);ctx.fillStyle=this.player.hp/this.player.maxHp<.3?"#ff4e45":"#73ff69";ctx.fillRect(31,52,238*clamp(this.player.hp/this.player.maxHp,0,1),20);ctx.strokeStyle="#aab1ae";ctx.strokeRect(31,52,238,20);ctx.fillStyle="#fff";ctx.font="700 15px monospace";ctx.textAlign="left";ctx.fillText(`HP  ${Math.ceil(Math.max(0,this.player.hp))} / ${this.player.maxHp}`,31,42);ctx.textAlign="center";ctx.font="900 25px Impact, sans-serif";ctx.fillText(`ЗОНДБИ: ${this.kills}`,W/2,42);ctx.font="700 16px monospace";ctx.fillStyle="#b4bcba";ctx.fillText(formatTime(this.time),W/2,67);ctx.textAlign="right";ctx.fillStyle="#73ff69";ctx.font="900 22px Impact, sans-serif";ctx.fillText(weapons[this.weaponLevel].name,W-28,42)}if(this.banner>0){const a=Math.min(1,this.banner*2,(2-this.banner)*4);ctx.globalAlpha=clamp(a,0,1);ctx.fillStyle="rgba(8,10,11,.86)";ctx.fillRect(W/2-300,H/2-58,600,116);ctx.textAlign="center";ctx.fillStyle="#73ff69";ctx.font="900 23px monospace";ctx.fillText(this.bannerTitle||"СОБЫТИЕ",W/2,H/2-10);ctx.fillStyle="#fff";ctx.font="900 38px Impact, sans-serif";ctx.fillText(this.bannerText,W/2,H/2+35);ctx.globalAlpha=1}}
+ draw(){ctx.save();if(this.shake)ctx.translate(rand(-this.shake,this.shake),rand(-this.shake,this.shake));this.drawBackground();for(const o of this.obstacles)this.drawObstacle(o);if(this.player){for(const e of this.enemies)e.draw();for(const b of this.bullets)b.draw();this.player.draw(this);for(const p of this.particles)p.draw();this.drawHud()}ctx.restore()}
+ loop(now){const dt=Math.min(.033,(now-this.last)/1000);this.last=now;if(this.state==="play")this.update(dt);this.draw();requestAnimationFrame(t=>this.loop(t))}
+}
+
+const keys={};addEventListener("keydown",e=>{keys[e.code]=true;if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Space"].includes(e.code))e.preventDefault()});addEventListener("keyup",e=>keys[e.code]=false);addEventListener("blur",()=>{for(const k in keys)keys[k]=false;resetJoystick()});
+const joystick={x:0,y:0,pointer:null,baseX:0,baseY:0,max:60},joyEl=document.getElementById("joystick"),joyBase=document.getElementById("joystick-base"),knob=document.getElementById("joystick-knob");
+function moveJoystick(e){if(e.pointerId!==joystick.pointer)return;e.preventDefault();const r=joyEl.getBoundingClientRect(),cx=r.left+joystick.baseX,cy=r.top+joystick.baseY;let dx=e.clientX-cx,dy=e.clientY-cy,l=Math.hypot(dx,dy);if(l>joystick.max){dx=dx/l*joystick.max;dy=dy/l*joystick.max;l=joystick.max}const dead=.1,raw=Math.min(1,l/joystick.max),power=raw<=dead?0:(raw-dead)/(1-dead),nx=l?dx/l:0,ny=l?dy/l:0;joystick.x=nx*power;joystick.y=ny*power;knob.style.transform=`translate(calc(-50% + ${dx}px),calc(-50% + ${dy}px))`}
+function resetJoystick(e){if(e&&joystick.pointer!==null&&e.pointerId!==undefined&&e.pointerId!==joystick.pointer)return;joystick.x=joystick.y=0;joystick.pointer=null;joyBase.style.opacity=0;knob.style.opacity=0;knob.style.transform="translate(-50%,-50%)"}
+joyEl.addEventListener("pointerdown",e=>{if(game.state!=="play"||joystick.pointer!==null)return;e.preventDefault();const r=joyEl.getBoundingClientRect();joystick.pointer=e.pointerId;joystick.baseX=e.clientX-r.left;joystick.baseY=e.clientY-r.top;joystick.max=Math.max(42,joyBase.getBoundingClientRect().width*.43);for(const el of [joyBase,knob]){el.style.left=`${joystick.baseX}px`;el.style.top=`${joystick.baseY}px`;el.style.opacity=1}try{joyEl.setPointerCapture(e.pointerId)}catch(_){}moveJoystick(e)},{passive:false});
+joyEl.addEventListener("pointermove",moveJoystick,{passive:false});
+for(const type of ["pointerup","pointercancel","lostpointercapture"])joyEl.addEventListener(type,resetJoystick);
+for(const type of ["pointerup","pointercancel"])addEventListener(type,resetJoystick,true);
+addEventListener("pagehide",resetJoystick);document.addEventListener("freeze",resetJoystick);
+function hideAll(){ui.start.classList.remove("active");ui.upgrade.classList.remove("active");ui.over.classList.remove("active")}
+const game=new Game();
+document.getElementById("start-button").onclick=()=>game.start();document.getElementById("restart-button").onclick=()=>game.start();document.getElementById("menu-button").onclick=()=>{hideAll();ui.start.classList.add("active");game.state="menu";game.player=null;game.enemies=[];game.bullets=[];game.particles=[]};
+document.addEventListener("visibilitychange",()=>{game.last=performance.now();if(document.hidden)resetJoystick()});
+for(const event of ["gesturestart","gesturechange","gestureend","dblclick","contextmenu"])document.addEventListener(event,e=>e.preventDefault(),{passive:false});
+document.addEventListener("touchmove",e=>e.preventDefault(),{passive:false});
+let deferredInstall=null;const installButton=document.getElementById("install-button");
+addEventListener("beforeinstallprompt",e=>{e.preventDefault();deferredInstall=e;installButton.hidden=false});
+installButton.addEventListener("click",async()=>{if(!deferredInstall)return;deferredInstall.prompt();await deferredInstall.userChoice;deferredInstall=null;installButton.hidden=true});
+addEventListener("appinstalled",()=>{installButton.hidden=true;deferredInstall=null});
+if("serviceWorker" in navigator)addEventListener("load",()=>navigator.serviceWorker.register("./sw.js"));
